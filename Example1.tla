@@ -12,7 +12,7 @@
 (* "nominate" and "vote" messages that are flooded throughout the network. *)
 (* One node first floods a "nominate" message.  Then, a node that receives *)
 (* a "nominate" message floods a "vote" message in response.  When a node  *)
-(* observes that all nodes have sent a "nominate" message, it terminates.  *)
+(* observes that all nodes have sent a "vote" message, it terminates.      *)
 (*                                                                         *)
 (* To speed up model-checking, we model queues as sets (to avoid the       *)
 (* combinatorial explosion caused by queue permutations).  Thus the system *)
@@ -216,5 +216,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Feb 02 18:11:50 PST 2022 by nano
+\* Last modified Wed Feb 02 18:14:56 PST 2022 by nano
 \* Created Tue Feb 01 16:18:02 PST 2022 by nano
