@@ -1,20 +1,20 @@
 ------------------------------ MODULE Example1 ------------------------------
 
 (***************************************************************************)
-(* We have a distributed system in which nodes communicate through         *)
-(* fixed-capacity message queues and a send primitive that blocks when the *)
-(* receipient's queue is full.  We want to use the TLC model-checker to    *)
-(* find the smallest queue capacity that guarantees that there are no      *)
-(* deadlocks.                                                              *)
+(* We have a distributed system in which nodes run a toy version of        *)
+(* Stellar's nomination protocol and communicate through fixed-capacity    *)
+(* message queues and a send primitive that blocks when the receipient's   *)
+(* queue is full.  We want to use the TLC model-checker to find the        *)
+(* smallest queue capacity that guarantees that there are no deadlocks.    *)
 (*                                                                         *)
 (* Nodes are placed in a network represented by a directed graph, where an *)
 (* edge from node n to node m means n can send to m.  Nodes send           *)
 (* "nominate" and "vote" messages that are flooded throughout the network. *)
-(* A node that receives a "nominate" message containing value v floods a   *)
-(* "vote" message for value v in response.  When a node observes that a    *)
-(* value v has been voted for by all nodes, it terminates.                 *)
+(* One node first floods a "nominate" message.  Then, a node that receives *)
+(* a "nominate" message floods a "vote" message in response.  When a node  *)
+(* observes that all nodes have sent a "nominate" message, it terminates.  *)
 (*                                                                         *)
-(* To speed up model-checking, we'll model queues as sets (to avoid the    *)
+(* To speed up model-checking, we model queues as sets (to avoid the       *)
 (* combinatorial explosion caused by queue permutations).  Thus the system *)
 (* will behave as if a node were allowed to process a message that's       *)
 (* anywhere in its queue, not just at the top.                             *)
@@ -38,14 +38,13 @@ EXTENDS Naturals, FiniteSets, Sequences
 CONSTANTS
         N \* the number of nodes
     ,   C \* the capacity of the queues
-    ,   V \* the set of values
 
 Node == 0..N-1
 
 (***************************************************************************)
 (* Network topologies                                                      *)
 (***************************************************************************)    
-FullNetwork == Node\times Node
+FullNetwork == Node\times Node \ {<<n,n>> : n \in Node}
 RingNetwork == {<<n,(n+1)%N>> : n \in Node}
 RingNetworkPlusOneEdge == RingNetwork \cup {CHOOSE e \in Node\times Node : \neg e \in RingNetwork /\ e[1] # e[2]}
 \* bi-directional ring:
@@ -67,7 +66,7 @@ Network == FullNetwork
     {
 flood1:      
         while (done # Peers(self, Network)) {
-            with (peer \in Peers(self, Network) \ done) {
+            with (peer = CHOOSE n \in Peers(self, Network) \ done : TRUE) {
                 when (\neg Full(queue[peer]) \/ message \in queue[peer]); \* block until the peer's queue has room
                 queue[peer] := @ \cup {message}; \* '@' means the value we're assigning to, i.e. queue[peer] in this case.
                 done := done \cup {peer}
@@ -77,7 +76,7 @@ flood1:
     }
     process (node \in Node)
         variables
-            votes = [n \in Node |-> {}], \* the votes received
+            votes = {}, \* the votes received
             msg;  \* the message we're working on
     {
 l1:     \* we start by possibly nominating a value
@@ -85,36 +84,28 @@ l1:     \* we start by possibly nominating a value
             skip;
         else {
             nominated := TRUE;
-            with (v \in V)
-            call flood([type |-> "nominate", val |-> v]);
+            call flood([type |-> "nominate"]);
         };
-l3:     \* then we enter a receive loop
-        while (TRUE) {
-            either { \* receive a message
-                with (m \in queue[self])
-                    msg := m;
-                call flood(msg); \* flood the message to neighbors
+l2:     \* then we enter a receive loop
+        while (\E n \in Node : \neg n \in votes) {
+            \* receive a message
+            with (m \in queue[self])
+                msg := m;
+            call flood(msg); \* flood the message to neighbors
+l3:
+            if (msg.type = "nominate") {
+                call flood([sender |-> self, type |-> "vote"]);
+            }
+            else if (msg.type = "vote") {
+                votes := @ \cup {msg.sender};
+            };
 l4:
-                if (msg.type = "nominate") {
-                    call flood([sender |-> self, type |-> "vote", val |-> msg.val]);
-                }
-                else if (msg.type = "vote") {
-                    votes[msg.sender] := @ \cup {msg.val};
-                };
-l5:
-                queue[self] := @ \ {msg};
-            }
-            or {    \* decide and be done
-                with (v \in V) {
-                    when (\A n \in Node : v \in votes[n]);
-                    goto Done;
-                }
-            }
+            queue[self] := @ \ {msg};
         }
     }
 }
 *)
-\* BEGIN TRANSLATION (chksum(pcal) = "59d323fd" /\ chksum(tla) = "842fe618")
+\* BEGIN TRANSLATION (chksum(pcal) = "a6fbcb1b" /\ chksum(tla) = "c7c943a4")
 CONSTANT defaultInitValue
 VARIABLES queue, nominated, pc, stack, message, done, votes, msg
 
@@ -129,14 +120,14 @@ Init == (* Global variables *)
         /\ message = [ self \in ProcSet |-> defaultInitValue]
         /\ done = [ self \in ProcSet |-> {}]
         (* Process node *)
-        /\ votes = [self \in Node |-> [n \in Node |-> {}]]
+        /\ votes = [self \in Node |-> {}]
         /\ msg = [self \in Node |-> defaultInitValue]
         /\ stack = [self \in ProcSet |-> << >>]
         /\ pc = [self \in ProcSet |-> "l1"]
 
 flood1(self) == /\ pc[self] = "flood1"
                 /\ IF done[self] # Peers(self, Network)
-                      THEN /\ \E peer \in Peers(self, Network) \ done[self]:
+                      THEN /\ LET peer == CHOOSE n \in Peers(self, Network) \ done[self] : TRUE IN
                                 /\ (\neg Full(queue[peer]) \/ message[self] \in queue[peer])
                                 /\ queue' = [queue EXCEPT ![peer] = @ \cup {message[self]}]
                                 /\ done' = [done EXCEPT ![self] = done[self] \cup {peer}]
@@ -154,42 +145,40 @@ flood(self) == flood1(self)
 l1(self) == /\ pc[self] = "l1"
             /\ IF nominated
                   THEN /\ TRUE
-                       /\ pc' = [pc EXCEPT ![self] = "l3"]
+                       /\ pc' = [pc EXCEPT ![self] = "l2"]
                        /\ UNCHANGED << nominated, stack, message, done >>
                   ELSE /\ nominated' = TRUE
-                       /\ \E v \in V:
-                            /\ /\ message' = [message EXCEPT ![self] = [type |-> "nominate", val |-> v]]
-                               /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "flood",
-                                                                        pc        |->  "l3",
-                                                                        done      |->  done[self],
-                                                                        message   |->  message[self] ] >>
-                                                                    \o stack[self]]
-                            /\ done' = [done EXCEPT ![self] = {}]
-                            /\ pc' = [pc EXCEPT ![self] = "flood1"]
+                       /\ /\ message' = [message EXCEPT ![self] = [type |-> "nominate"]]
+                          /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "flood",
+                                                                   pc        |->  "l2",
+                                                                   done      |->  done[self],
+                                                                   message   |->  message[self] ] >>
+                                                               \o stack[self]]
+                       /\ done' = [done EXCEPT ![self] = {}]
+                       /\ pc' = [pc EXCEPT ![self] = "flood1"]
             /\ UNCHANGED << queue, votes, msg >>
 
-l3(self) == /\ pc[self] = "l3"
-            /\ \/ /\ \E m \in queue[self]:
-                       msg' = [msg EXCEPT ![self] = m]
-                  /\ /\ message' = [message EXCEPT ![self] = msg'[self]]
-                     /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "flood",
-                                                              pc        |->  "l4",
-                                                              done      |->  done[self],
-                                                              message   |->  message[self] ] >>
-                                                          \o stack[self]]
-                  /\ done' = [done EXCEPT ![self] = {}]
-                  /\ pc' = [pc EXCEPT ![self] = "flood1"]
-               \/ /\ \E v \in V:
-                       /\ (\A n \in Node : v \in votes[self][n])
-                       /\ pc' = [pc EXCEPT ![self] = "Done"]
-                  /\ UNCHANGED <<stack, message, done, msg>>
+l2(self) == /\ pc[self] = "l2"
+            /\ IF \E n \in Node : \neg n \in votes[self]
+                  THEN /\ \E m \in queue[self]:
+                            msg' = [msg EXCEPT ![self] = m]
+                       /\ /\ message' = [message EXCEPT ![self] = msg'[self]]
+                          /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "flood",
+                                                                   pc        |->  "l3",
+                                                                   done      |->  done[self],
+                                                                   message   |->  message[self] ] >>
+                                                               \o stack[self]]
+                       /\ done' = [done EXCEPT ![self] = {}]
+                       /\ pc' = [pc EXCEPT ![self] = "flood1"]
+                  ELSE /\ pc' = [pc EXCEPT ![self] = "Done"]
+                       /\ UNCHANGED << stack, message, done, msg >>
             /\ UNCHANGED << queue, nominated, votes >>
 
-l4(self) == /\ pc[self] = "l4"
+l3(self) == /\ pc[self] = "l3"
             /\ IF msg[self].type = "nominate"
-                  THEN /\ /\ message' = [message EXCEPT ![self] = [sender |-> self, type |-> "vote", val |-> msg[self].val]]
+                  THEN /\ /\ message' = [message EXCEPT ![self] = [sender |-> self, type |-> "vote"]]
                           /\ stack' = [stack EXCEPT ![self] = << [ procedure |->  "flood",
-                                                                   pc        |->  "l5",
+                                                                   pc        |->  "l4",
                                                                    done      |->  done[self],
                                                                    message   |->  message[self] ] >>
                                                                \o stack[self]]
@@ -197,19 +186,19 @@ l4(self) == /\ pc[self] = "l4"
                        /\ pc' = [pc EXCEPT ![self] = "flood1"]
                        /\ votes' = votes
                   ELSE /\ IF msg[self].type = "vote"
-                             THEN /\ votes' = [votes EXCEPT ![self][msg[self].sender] = @ \cup {msg[self].val}]
+                             THEN /\ votes' = [votes EXCEPT ![self] = @ \cup {msg[self].sender}]
                              ELSE /\ TRUE
                                   /\ votes' = votes
-                       /\ pc' = [pc EXCEPT ![self] = "l5"]
+                       /\ pc' = [pc EXCEPT ![self] = "l4"]
                        /\ UNCHANGED << stack, message, done >>
             /\ UNCHANGED << queue, nominated, msg >>
 
-l5(self) == /\ pc[self] = "l5"
+l4(self) == /\ pc[self] = "l4"
             /\ queue' = [queue EXCEPT ![self] = @ \ {msg[self]}]
-            /\ pc' = [pc EXCEPT ![self] = "l3"]
+            /\ pc' = [pc EXCEPT ![self] = "l2"]
             /\ UNCHANGED << nominated, stack, message, done, votes, msg >>
 
-node(self) == l1(self) \/ l3(self) \/ l4(self) \/ l5(self)
+node(self) == l1(self) \/ l2(self) \/ l3(self) \/ l4(self)
 
 (* Allow infinite stuttering to prevent deadlock on termination. *)
 Terminating == /\ \A self \in ProcSet: pc[self] = "Done"
@@ -227,5 +216,5 @@ Termination == <>(\A self \in ProcSet: pc[self] = "Done")
 
 =============================================================================
 \* Modification History
-\* Last modified Wed Feb 02 17:45:41 PST 2022 by nano
+\* Last modified Wed Feb 02 18:11:50 PST 2022 by nano
 \* Created Tue Feb 01 16:18:02 PST 2022 by nano
